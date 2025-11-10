@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ABE Messenger</title>
+  <!-- Tailwind CDN for quick styling (no build step needed) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Google Identity Services (GIS) for Sign-In button) -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <style>
+    /* Simple scrollbar & chat bubbles */
+    .scroll-thin::-webkit-scrollbar { width: 6px; height: 6px; }
+    .scroll-thin::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9999px; }
+  </style>
+</head>
+<body class="h-screen bg-slate-100 text-slate-900">
+  <!-- ============ Auth Screen ============ -->
+  <section id="authScreen" class="h-full flex items-center justify-center p-6">
+    <div class="w-full max-w-md rounded-2xl bg-white shadow-xl p-8 space-y-6">
+      <div class="text-center space-y-2">
+        <h1 class="text-2xl font-semibold">Attribute‑Based Messenger</h1>
+        <p class="text-slate-600">Welcome to our Messaging App!</p>
+      </div>
+
+      <!-- GIS: onload sets up the Sign-In client with your OAuth Client ID -->
+      <div id="g_id_onload"
+           data-client_id="259080663918-p0itab9ioe0ra6o7e7tl2kdku1obt4r0.apps.googleusercontent.com"
+           data-context="signin"
+           data-ux_mode="popup"
+           data-callback="onGoogleCredentialResponse"
+           data-auto_prompt="false">
+      </div>
+
+      <!-- GIS button placeholder -->
+      <div class="flex justify-center">
+        <div class="g_id_signin"
+             data-type="standard"
+             data-shape="pill"
+             data-theme="outline"
+             data-text="signin_with"
+             data-size="large"
+             data-logo_alignment="left">
+        </div>
+      </div>
+
+      <div class="text-xs text-slate-500 text-center">
+        Test run
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ App Screen ============ -->
+  <section id="appScreen" class="hidden h-full">
+    <div class="h-full grid grid-cols-12">
+      <!-- Sidebar / Chats list -->
+      <aside class="col-span-12 md:col-span-4 xl:col-span-3 border-r border-slate-200 bg-white flex flex-col">
+        <!-- Current user header -->
+        <div class="p-4 border-b border-slate-200 flex items-center gap-3">
+          <div id="meAvatar" class="w-10 h-10 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center font-bold"></div>
+          <div>
+            <div id="meName" class="font-semibold"></div>
+            <div id="meEmail" class="text-xs text-slate-500"></div>
+          </div>
+          <button id="signOutBtn" class="ml-auto text-sm text-slate-500 hover:text-slate-700">Sign out</button>
+        </div>
+
+        <!-- Add friend -->
+        <div class="p-4 border-b border-slate-200 space-y-3">
+          <label class="block text-sm font-medium text-slate-700">Add friend by username (their email local‑part)</label>
+          <div class="flex gap-2">
+            <input id="friendInput" type="text" placeholder="e.g. alice" class="flex-1 rounded-xl border border-slate-300 px-3 py-2 focus:outline-none focus:ring focus:ring-indigo-200" />
+            <button id="addFriendBtn" class="px-3 py-2 rounded-xl bg-indigo-600 text-white hover:bg-indigo-700">Add</button>
+          </div>
+          <p class="text-xs text-slate-500">Your username: <span id="myUsername" class="font-semibold"></span></p>
+        </div>
+
+        <!-- Friends list -->
+        <div id="friendsList" class="flex-1 overflow-y-auto scroll-thin">
+          <!-- Populated by JS -->
+        </div>
+      </aside>
+
+      <!-- Chat area -->
+      <main class="col-span-12 md:col-span-8 xl:col-span-9 h-full flex flex-col">
+        <!-- Chat header -->
+        <div class="p-4 bg-white border-b border-slate-200 flex items-center gap-3">
+          <div id="peerAvatar" class="w-10 h-10 rounded-full bg-slate-200 text-slate-700 flex items-center justify-center font-bold"></div>
+          <div class="min-w-0">
+            <div id="peerName" class="font-semibold truncate">No conversation selected</div>
+            <div id="peerSub" class="text-xs text-slate-500">Add/select a friend to start messaging</div>
+          </div>
+        </div>
+
+        <!-- Messages -->
+        <div id="messagesScroll" class="flex-1 overflow-y-auto p-4 space-y-3 scroll-thin bg-slate-50">
+          <!-- Bubbles inserted here -->
+        </div>
+
+        <!-- Composer -->
+        <div class="p-4 bg-white border-t border-slate-200">
+          <form id="composer" class="flex gap-2">
+            <input id="messageInput" class="flex-1 rounded-xl border border-slate-300 px-4 py-3 focus:outline-none focus:ring focus:ring-indigo-200" placeholder="Write a message…" />
+            <button class="px-5 py-3 rounded-xl bg-indigo-600 text-white font-medium hover:bg-indigo-700" type="submit">Send</button>
+          </form>
+        </div>
+      </main>
+    </div>
+  </section>
+
+  <script>
+    // ---------------------- Utility helpers ----------------------
+    const $ = (sel) => document.querySelector(sel);
+    const el = (tag, cls="", text="") => { const n = document.createElement(tag); if (cls) n.className = cls; if (text) n.textContent = text; return n; };
+
+    // Persisted keys (local demo; replace with server calls later)
+    const LS_KEYS = {
+      ME: "abe.me",               // { email, name, picture, username }
+      FRIENDS: "abe.friends",     // [username]
+      THREADS: "abe.threads",     // map: threadId => [{ from, to, text, ts }]
+      ACTIVE: "abe.active"         // active peer username
+    };
+
+    const storage = {
+      get(k, def){ try { return JSON.parse(localStorage.getItem(k)) ?? def; } catch { return def; } },
+      set(k, v){ localStorage.setItem(k, JSON.stringify(v)); },
+      del(k){ localStorage.removeItem(k); }
+    };
+
+    const usernameFromEmail = (email) => (email || "").split("@")[0] || "";
+
+    function initials(name, fallback) {
+      const base = (name || fallback || "?").trim();
+      return base.split(/\s+/).slice(0,2).map(w=>w[0]?.toUpperCase()).join("") || "?";
+    }
+
+    function threadIdFor(a, b){
+      const [x,y] = [a,b].sort();
+      return `dm:${x}:${y}`;
+    }
+
+    function nowTs(){ return new Date().toISOString(); }
+
+    // ---------------------- Auth (Google Identity Services) ----------------------
+    // This callback receives an ID token (JWT). We decode locally to get profile basics.
+    window.onGoogleCredentialResponse = (resp) => {
+      try {
+        const payload = parseJwt(resp.credential);
+        const email = payload.email;
+        const name = payload.name || payload.given_name || usernameFromEmail(email);
+        const picture = payload.picture || "";
+        const me = { email, name, picture, username: usernameFromEmail(email) };
+        storage.set(LS_KEYS.ME, me);
+        // Seed defaults
+        if (!storage.get(LS_KEYS.FRIENDS)) storage.set(LS_KEYS.FRIENDS, []);
+        if (!storage.get(LS_KEYS.THREADS)) storage.set(LS_KEYS.THREADS, {});
+        // Move to app
+        mountApp();
+      } catch (e){
+        alert("Sign-in failed to parse. Check Client ID and Origin settings.");
+        console.error(e);
+      }
+    };
+
+    function parseJwt (token) {
+      const base64Url = token.split('.')[1];
+      const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+      const jsonPayload = decodeURIComponent(atob(base64).split('').map(function(c) {
+          return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+      }).join(''));
+      return JSON.parse(jsonPayload);
+    }
+
+    // ---------------------- App boot / sign-out ----------------------
+    function mountApp(){
+      const me = storage.get(LS_KEYS.ME);
+      if (!me){
+        // show auth screen
+        $('#appScreen').classList.add('hidden');
+        $('#authScreen').classList.remove('hidden');
+        return;
+      }
+      // show app
+      $('#authScreen').classList.add('hidden');
+      $('#appScreen').classList.remove('hidden');
+
+      // Fill header
+      $('#meName').textContent = me.name;
+      $('#meEmail').textContent = me.email;
+      $('#myUsername').textContent = me.username;
+      $('#meAvatar').textContent = initials(me.name, me.username);
+
+      // Bind sign out
+      $('#signOutBtn').onclick = () => {
+        storage.del(LS_KEYS.ME);
+        storage.del(LS_KEYS.ACTIVE);
+        mountApp();
+      };
+
+      // Friends UI
+      renderFriends();
+
+      // Active thread
+      const active = storage.get(LS_KEYS.ACTIVE, null);
+      if (active) openThread(active); else clearChatHeader();
+
+      // Add friend
+      $('#addFriendBtn').onclick = () => {
+        const input = $('#friendInput');
+        const uname = (input.value || '').trim().toLowerCase();
+        if (!uname) return;
+        const friends = new Set(storage.get(LS_KEYS.FRIENDS, []));
+        if (uname === me.username){ alert("You can't add yourself."); return; }
+        friends.add(uname);
+        storage.set(LS_KEYS.FRIENDS, Array.from(friends).sort());
+        input.value = '';
+        renderFriends();
+      };
+
+      // Composer
+      $('#composer').onsubmit = (e) => {
+        e.preventDefault();
+        const text = ($('#messageInput').value || '').trim();
+        const peer = storage.get(LS_KEYS.ACTIVE);
+        if (!peer){ alert('Select a friend first'); return; }
+        if (!text) return;
+        sendMessage(me.username, peer, text);
+        $('#messageInput').value = '';
+      };
+    }
+
+    function clearChatHeader(){
+      $('#peerAvatar').textContent = '';
+      $('#peerName').textContent = 'No conversation selected';
+      $('#peerSub').textContent = 'Add/select a friend to start messaging';
+      $('#messagesScroll').innerHTML = '';
+    }
+
+    // ---------------------- Friends & Threads ----------------------
+    function renderFriends(){
+      const friends = storage.get(LS_KEYS.FRIENDS, []);
+      const active = storage.get(LS_KEYS.ACTIVE, null);
+      const list = $('#friendsList');
+      list.innerHTML = '';
+
+      if (friends.length === 0){
+        const empty = el('div','p-8 text-center text-slate-500');
+        empty.textContent = 'No friends yet. Add someone by username to start a chat.';
+        list.appendChild(empty);
+        return;
+      }
+
+      friends.forEach(u => {
+        const row = el('button', `w-full flex items-center gap-3 p-3 border-b border-slate-100 hover:bg-slate-50 ${active===u? 'bg-indigo-50' : ''}`);
+        const av = el('div','w-9 h-9 rounded-full bg-slate-200 text-slate-700 flex items-center justify-center font-bold', u.slice(0,2).toUpperCase());
+        const info = el('div','text-left flex-1');
+        const name = el('div','font-medium', u);
+        const sub = el('div','text-xs text-slate-500','Tap to open chat');
+        info.appendChild(name); info.appendChild(sub);
+        row.appendChild(av); row.appendChild(info);
+        row.onclick = () => openThread(u);
+        list.appendChild(row);
+      });
+    }
+
+    function openThread(peerUsername){
+      const me = storage.get(LS_KEYS.ME);
+      storage.set(LS_KEYS.ACTIVE, peerUsername);
+      $('#peerAvatar').textContent = initials(peerUsername, peerUsername);
+      $('#peerName').textContent = peerUsername;
+      $('#peerSub').textContent = 'Direct messages · local demo only';
+      renderFriends();
+      renderMessages(me.username, peerUsername);
+    }
+
+    function sendMessage(from, to, text){
+      const threads = storage.get(LS_KEYS.THREADS, {});
+      const id = threadIdFor(from, to);
+      const arr = threads[id] || [];
+      // In the real app, encrypt here (AES-GCM/ABE) and send ciphertext to server.
+      arr.push({ from, to, text, ts: nowTs() });
+      threads[id] = arr;
+      storage.set(LS_KEYS.THREADS, threads);
+      renderMessages(from, to);
+    }
+
+    function renderMessages(a, b){
+      const id = threadIdFor(a,b);
+      const threads = storage.get(LS_KEYS.THREADS, {});
+      const msgs = threads[id] || [];
+      const host = $('#messagesScroll');
+      host.innerHTML = '';
+      msgs.forEach(m => {
+        const mine = m.from === a;
+        const wrap = el('div', `flex ${mine?'justify-end':''}`);
+        const bubble = el('div', `max-w-[70%] rounded-2xl px-4 py-2 shadow ${mine? 'bg-indigo-600 text-white rounded-br-sm' : 'bg-white text-slate-900 rounded-bl-sm border border-slate-200'}`);
+        bubble.innerHTML = `<div class="text-sm whitespace-pre-wrap">${escapeHtml(m.text)}</div>` +
+                           `<div class="text-[10px] opacity-70 mt-1">${new Date(m.ts).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</div>`;
+        wrap.appendChild(bubble);
+        host.appendChild(wrap);
+      });
+      // auto-scroll
+      host.scrollTop = host.scrollHeight;
+    }
+
+    function escapeHtml(str){
+      return (str||'').replace(/[&<>"]/g, s=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[s]||s));
+    }
+
+    // Boot either auth or app on load
+    document.addEventListener('DOMContentLoaded', mountApp);
+  </script>
+</body>
+</html>
